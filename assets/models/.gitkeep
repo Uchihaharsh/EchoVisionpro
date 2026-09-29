@@ -1,0 +1,3 @@
+# Place your TFLite models here:
+# - ssd_mobilenet.tflite (Object Detection - download from TF Model Zoo)
+# - currency_classifier.tflite (Your custom trained Indian currency model)

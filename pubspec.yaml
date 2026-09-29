@@ -1,0 +1,41 @@
+name: smart_glasses
+description: Smart Glasses for Visually Impaired - Assistive Technology App
+version: 1.0.0+1
+publish_to: 'none'
+
+environment:
+  sdk: ^3.7.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.6.1
+  camera: ^0.11.3+1
+  google_mlkit_text_recognition: ^0.15.1
+  google_mlkit_object_detection: ^0.15.1
+  google_mlkit_image_labeling: ^0.14.2
+  flutter_tts: ^4.2.5
+  tflite_flutter: ^0.12.1
+  google_maps_flutter: ^2.17.0
+  geolocator: ^14.0.3
+  permission_handler: ^11.3.1
+  http: ^1.3.0
+  path_provider: ^2.1.5
+  image: ^4.7.0
+  wakelock_plus: ^1.1.4
+  flutter_compass: ^0.8.1
+  flutter_ffi_uvc: ^0.11.0
+  flutter_map: ^8.3.1
+  latlong2: ^0.10.1
+  speech_to_text: ^7.4.0
+  google_generative_ai: ^0.4.7
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/models/
+    - assets/labels/
