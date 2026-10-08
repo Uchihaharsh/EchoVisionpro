@@ -52,7 +52,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     } else {
       ref.read(ttsStateProvider.notifier).speak(
         'Critical permissions were denied. Please go to your phone Settings, find Echo Vision, and allow both Microphone and Camera access for the app to function.',
-        priority: TTSPriority.critical,
+        
       );
     }
   }
