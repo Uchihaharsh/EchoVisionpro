@@ -50,6 +50,7 @@ class VoiceAssistantService {
   // Liveness watchdog and continuous restart timers
   Timer? _livenessWatchdog;
   Timer? _restartTimer;
+  Timer? _wakeWordDebounceTimer;
   bool _isRestarting = false;
 
   // Acoustic echo tracking
@@ -255,18 +256,30 @@ class VoiceAssistantService {
             _wakeWordActiveUntil = now.add(const Duration(seconds: 10));
           }
 
-          // Case 0: User said ONLY "Hey Echo" -> Wait for final result before answering!
-          // This prevents cutting off the user when they say "Hey Echo open currency" in one sentence.
+          // Cancel previous debounce timer on ANY new speech activity
+          _wakeWordDebounceTimer?.cancel();
+
+          // Case 0: User said ONLY "Hey Echo" -> Wait for final result OR a 650ms pause before answering!
+          // This prevents cutting off the user when they say "Hey Echo open currency" in one rapid sentence.
           if (cmd.type == VoiceCommandType.wakeWordPrompt) {
             if (result.finalResult) {
               _wakeWordActiveUntil = now.add(const Duration(seconds: 10));
               _dispatchCommand(cmd);
+            } else {
+              _wakeWordDebounceTimer = Timer(const Duration(milliseconds: 650), () {
+                _wakeWordActiveUntil = DateTime.now().add(const Duration(seconds: 10));
+                _dispatchCommand(cmd);
+              });
             }
             return;
           }
 
           // Case 1: Actionable command (e.g. "open currency", "open object detection", "go home", "tell time", etc.)
           if (cmd.type != VoiceCommandType.unknown) {
+            if (!hasWakeWord && !isWakeActive) {
+              return; // Ignore background noise that happens to match a command!
+            }
+            _wakeWordDebounceTimer?.cancel();
             _wakeWordActiveUntil = null;
             _dispatchCommand(cmd);
             return;
@@ -342,7 +355,7 @@ class VoiceAssistantService {
     }
 
     final wakeWordRegex = RegExp(
-      r'\b(hey echo|ok echo|okay echo|hi echo|hello echo|hey eco|ok eco|hi eco|hey eko|ok eko|hi eko|hey iko|eko|eco|ekho|aiko|he echo|hay echo|ok google|hey google)\b',
+      r'\b(hey echo|ok echo|okay echo|hi echo|hello echo|hey eco|ok eco|hi eco|hey eko|ok eko|hi eko|hey iko|eko|eco|ekho|aiko|he echo|hay echo|ok google|hey google|echo|ego|hey ego|akko|hey akko|aako|hey aako)\b',
       caseSensitive: false,
     );
     final hasWakeWord = wakeWordRegex.hasMatch(clean);
@@ -535,6 +548,7 @@ class VoiceAssistantService {
   void dispose() {
     _livenessWatchdog?.cancel();
     _restartTimer?.cancel();
+    _wakeWordDebounceTimer?.cancel();
     stopListening();
     _listeningStatusController.close();
     _partialWordsController.close();
