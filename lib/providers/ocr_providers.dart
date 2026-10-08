@@ -84,10 +84,13 @@ class OcrStateNotifier extends StateNotifier<OcrState> {
     }
   }
 
+  bool _isProcessingFrame = false;
+
   /// Processes a single frame for text detection
   Future<void> processFrame(dynamic frameData) async {
-    if (!state.isScanning) return;
+    if (!state.isScanning || _isProcessingFrame) return;
 
+    _isProcessingFrame = true;
     try {
       final result = await _ocrService.processFrame(frameData);
       if (!state.isScanning) return;
@@ -105,6 +108,8 @@ class OcrStateNotifier extends StateNotifier<OcrState> {
       if (state.isScanning) {
         state = state.copyWith(error: e.toString());
       }
+    } finally {
+      _isProcessingFrame = false;
     }
   }
 }

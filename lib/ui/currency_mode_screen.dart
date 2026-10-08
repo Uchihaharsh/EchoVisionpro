@@ -66,9 +66,20 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
 
   void _startScanLoop() {
     _scanTimer?.cancel();
-    _scanTimer = Timer.periodic(const Duration(milliseconds: 3000), (_) {
-      if (mounted && _isActive) {
-        _captureAndScan();
+    _scanTimer = Timer.periodic(const Duration(milliseconds: 3000), (_) async {
+      if (!mounted || !_isActive) return;
+
+      final cameraService = ref.read(cameraServiceProvider);
+      if (cameraService.currentSource.isUsbCamera) {
+        await _captureAndScan();
+      } else {
+        // Native camera uses continuous frame stream. Just read the state and speak it!
+        final state = ref.read(currencyStateProvider);
+        final result = state.lastResult;
+        if (result != null && result != _lastAnnouncedDenomination && !ref.read(ttsStateProvider).isSpeaking) {
+          _lastAnnouncedDenomination = result;
+          ref.read(ttsStateProvider.notifier).speak('$result Rupees detected', interrupt: true);
+        }
       }
     });
   }

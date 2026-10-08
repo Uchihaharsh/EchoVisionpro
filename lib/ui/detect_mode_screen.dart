@@ -70,11 +70,16 @@ class _DetectModeScreenState extends ConsumerState<DetectModeScreen> {
 
   void _startScanLoop() {
     _scanTimer?.cancel();
-    // USB camera path: periodic snapshot every 3.5 seconds
     _scanTimer = Timer.periodic(const Duration(milliseconds: 3500), (_) async {
       if (!mounted || !_isActive) return;
-      await _captureAndDetect(forceSpeak: false, useCloudGemini: false);
-      // After processFrame updates state, auto-announce if object changed or 10s passed
+      
+      final cameraService = ref.read(cameraServiceProvider);
+      if (cameraService.currentSource.isUsbCamera) {
+        // USB camera path: periodic snapshot every 3.5 seconds
+        await _captureAndDetect(forceSpeak: false, useCloudGemini: false);
+      }
+      
+      // Auto-announce if object changed or 10s passed
       if (!mounted || !_isActive) return;
       final results = ref.read(detectionStateProvider).results;
       if (results.isNotEmpty && !ref.read(ttsStateProvider).isSpeaking) {
@@ -91,7 +96,6 @@ class _DetectModeScreenState extends ConsumerState<DetectModeScreen> {
       }
     });
   }
-
 
   Future<void> _captureAndDetect({required bool forceSpeak, bool useCloudGemini = false}) async {
     if (_isProcessingSnapshot || !mounted || !_isActive) return;

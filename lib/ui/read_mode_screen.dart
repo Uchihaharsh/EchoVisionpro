@@ -88,8 +88,13 @@ class _ReadModeScreenState extends ConsumerState<ReadModeScreen> {
     _scanTimer?.cancel();
     _scanTimer = Timer.periodic(const Duration(milliseconds: 3500), (_) async {
       if (_isContinuous && mounted && _isActive) {
-        await _captureAndScan();
-        // After scan, check for new text to announce
+        final cameraService = ref.read(cameraServiceProvider);
+        
+        if (cameraService.currentSource.isUsbCamera) {
+          await _captureAndScan();
+        }
+        
+        // After scan (or from native continuous stream), check for new text to announce
         if (!mounted || !_isActive) return;
         final ocrState = ref.read(ocrStateProvider);
         final text = ocrState.recognizedText;

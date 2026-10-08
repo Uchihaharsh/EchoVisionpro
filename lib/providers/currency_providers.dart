@@ -98,7 +98,7 @@ class CurrencyStateNotifier extends StateNotifier<CurrencyState> {
   /// Processes a camera frame for currency.
   /// Returns the detected denomination string or null.
   Future<String?> processFrame(dynamic frameData) async {
-    if (!_isScanning || !state.isModelLoaded) return null;
+    if (!_isScanning || !state.isModelLoaded || state.isClassifying) return null;
     state = state.copyWith(isClassifying: true);
     try {
       final result = await _currencyService.classifyCurrency(frameData);
