@@ -50,8 +50,10 @@ class TTSService {
 
       _tts.setCancelHandler(() {
         _speechWatchdogTimer?.cancel();
-        _isSpeaking = false;
-        _speakingStateController.add(false);
+        // Since cancel can arrive asynchronously AFTER we already started the next phrase,
+        // we DO NOT aggressively set _isSpeaking = false here if we've already bumped the session!
+        // We only clear the queue.
+        _queue.clear();
       });
 
       _tts.setErrorHandler((msg) {
@@ -82,15 +84,20 @@ class TTSService {
     });
   }
 
+  int _ttsSessionId = 0;
+
   Future<void> speak(String text, {TTSPriority priority = TTSPriority.normal, bool interrupt = false}) async {
     try {
       if (text.isEmpty) return;
 
       if (interrupt || priority == TTSPriority.critical) {
         _queue.clear();
+        _ttsSessionId++;
+        final currentSession = _ttsSessionId;
         await _tts.stop();
-        // Give native Android TTS engine a tiny moment to process the stop and fire CancelHandler
-        await Future.delayed(const Duration(milliseconds: 50));
+        
+        // Only start if we are still the active session (i.e. another interrupt didn't happen)
+        if (_ttsSessionId != currentSession) return;
         
         _isSpeaking = true;
         _speakingStateController.add(true);
@@ -117,6 +124,7 @@ class TTSService {
 
   Future<void> stop() async {
     try {
+      _ttsSessionId++;
       _speechWatchdogTimer?.cancel();
       _queue.clear();
       await _tts.stop();
