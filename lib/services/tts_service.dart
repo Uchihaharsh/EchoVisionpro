@@ -87,7 +87,11 @@ class TTSService {
       if (text.isEmpty) return;
 
       if (interrupt || priority == TTSPriority.critical) {
-        await stop();
+        _queue.clear();
+        await _tts.stop();
+        // Give native Android TTS engine a tiny moment to process the stop and fire CancelHandler
+        await Future.delayed(const Duration(milliseconds: 50));
+        
         _isSpeaking = true;
         _speakingStateController.add(true);
         _armWatchdog(text);

@@ -132,12 +132,6 @@ class _ReadModeScreenState extends ConsumerState<ReadModeScreen> {
     _scanTimer = null;
     _frameSub?.cancel();
     _frameSub = null;
-    
-    // Capture notifier synchronously to safely call it after deactivate/dispose
-    final notifier = ref.read(ocrStateProvider.notifier);
-    Future.microtask(() {
-      notifier.stopOcr();
-    });
   }
 
   void _toggleContinuous() {

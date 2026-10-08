@@ -113,12 +113,6 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
     _scanTimer = null;
     _frameSub?.cancel();
     _frameSub = null;
-    
-    // Capture notifier synchronously to safely call it after deactivate/dispose
-    final notifier = ref.read(currencyStateProvider.notifier);
-    Future.microtask(() {
-      notifier.stopScanning();
-    });
   }
 
   @override
