@@ -19,63 +19,101 @@ class CurrencyModeScreen extends ConsumerStatefulWidget {
 }
 
 class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
-  Timer? _usbScanTimer;
+  Timer? _scanTimer;
   bool _isProcessingSnapshot = false;
+  StreamSubscription<dynamic>? _frameSub;
+  bool _isActive = false;
+  String? _lastAnnouncedDenomination;
 
   @override
   void initState() {
     super.initState();
     WakelockPlus.enable();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      _isActive = true;
       ref.read(voiceAssistantStateProvider.notifier).setCurrentScreen('currency');
-      ref.read(cameraStateProvider.notifier).initializeCamera();
-      ref.read(currencyStateProvider.notifier).initialize();
+
+      // Ensure camera is ready — only initialize if not already done
+      final camState = ref.read(cameraStateProvider);
+      if (!camState.isInitialized) {
+        await ref.read(cameraStateProvider.notifier).initializeCamera();
+      }
+
+      await ref.read(currencyStateProvider.notifier).initialize();
       ref.read(currencyStateProvider.notifier).startScanning();
-      ref.read(ttsStateProvider.notifier).speak('Currency Recognition Active. Point camera at banknote.');
-      _startUsbScanLoop();
+
+      // Wait for: (1) voice assistant TTS to finish, (2) old screen's deactivate() to run
+      await Future.delayed(const Duration(milliseconds: 1500));
+      if (!mounted || !_isActive) return;
+      ref.read(ttsStateProvider.notifier).speak('Currency mode active. Point camera at banknote.');
+
+      _startFrameStream();
+      _startScanLoop();
     });
   }
 
-  void _startUsbScanLoop() {
-    _usbScanTimer?.cancel();
-    // Calm 3.0 second cadence to prevent audio spam and lag
-    _usbScanTimer = Timer.periodic(const Duration(milliseconds: 3000), (_) {
-      if (mounted) {
+  void _startFrameStream() {
+    final cameraService = ref.read(cameraServiceProvider);
+    final source = cameraService.currentSource;
+    if (!source.isUsbCamera) {
+      _frameSub = source.frameStream.listen((image) {
+        if (!mounted || !_isActive) return;
+        ref.read(currencyStateProvider.notifier).processFrame(image);
+      });
+    }
+  }
+
+  void _startScanLoop() {
+    _scanTimer?.cancel();
+    _scanTimer = Timer.periodic(const Duration(milliseconds: 3000), (_) {
+      if (mounted && _isActive) {
         _captureAndScan();
       }
     });
   }
 
   Future<void> _captureAndScan() async {
-    if (_isProcessingSnapshot || !mounted) return;
-    // Skip if TTS is currently announcing a denomination
+    if (_isProcessingSnapshot || !mounted || !_isActive) return;
     if (ref.read(ttsStateProvider).isSpeaking) return;
 
     try {
       _isProcessingSnapshot = true;
       final cameraService = ref.read(cameraServiceProvider);
       final bytes = await cameraService.extractFrame();
-      if (bytes != null && bytes.isNotEmpty && mounted) {
-        await ref.read(currencyStateProvider.notifier).processImageBytes(bytes);
+      if (bytes != null && bytes.isNotEmpty && mounted && _isActive) {
+        final result = await ref.read(currencyStateProvider.notifier).processImageBytes(bytes);
+        // Announce denomination if new (avoid repeating the same note)
+        if (result != null && result != _lastAnnouncedDenomination) {
+          _lastAnnouncedDenomination = result;
+          ref.read(ttsStateProvider.notifier).speak('$result Rupees detected', interrupt: true);
+        }
       }
     } catch (e) {
-      debugPrint('Error in Currency _captureAndScan: $e');
+      debugPrint('CurrencyMode: capture error: $e');
     } finally {
       _isProcessingSnapshot = false;
     }
   }
 
+  void _cleanup() {
+    _isActive = false;
+    _scanTimer?.cancel();
+    _scanTimer = null;
+    _frameSub?.cancel();
+    _frameSub = null;
+    ref.read(currencyStateProvider.notifier).stopScanning();
+  }
+
   @override
   void deactivate() {
-    _usbScanTimer?.cancel();
+    _cleanup();
     super.deactivate();
   }
 
   @override
   void dispose() {
-    _usbScanTimer?.cancel();
     WakelockPlus.disable();
-    ref.read(currencyStateProvider.notifier).stopScanning();
     super.dispose();
   }
 
@@ -89,22 +127,6 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
   Widget build(BuildContext context) {
     final currencyState = ref.watch(currencyStateProvider);
 
-    // Listen to camera frame stream for phone camera fallback
-    ref.listen(cameraFrameStreamProvider, (previous, next) {
-      if (!mounted) return;
-      next.whenData((image) {
-        if (!mounted) return;
-        ref.read(currencyStateProvider.notifier).processFrame(image);
-      });
-    });
-
-    ref.listen(currencyStateProvider, (previous, next) {
-      if (!mounted) return;
-      if (next.denomination != null && next.denomination != previous?.denomination) {
-        ref.read(ttsStateProvider.notifier).speak('${next.denomination} Rupees detected', interrupt: true);
-      }
-    });
-
     return PopScope(
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) {
@@ -116,7 +138,8 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
         appBar: AppBar(
           title: Semantics(
             header: true,
-            child: const Text('Currency Recognition', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 24.0)),
+            child: const Text('Currency Recognition',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 24.0)),
           ),
           backgroundColor: Colors.grey[900],
           foregroundColor: Colors.greenAccent,
@@ -134,80 +157,81 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
             ),
           ],
         ),
-      body: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () async {
-          ref.read(ttsStateProvider.notifier).speak('Scanning banknote.');
-          await _captureAndScan();
-        },
-        child: Stack(
-          children: [
-            const CameraPreviewWidget(),
-            
-            const Align(
-              alignment: Alignment.topCenter,
-              child: StatusBanner(
-                statusText: 'Point camera at a bank note',
-                isActive: true,
-                icon: Icons.currency_rupee,
-              ),
-            ),
-            
-            if (currencyState.denomination != null)
-              Center(
-                child: AnimatedOpacity(
-                  opacity: 1.0,
-                  duration: const Duration(milliseconds: 500),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 32.0, vertical: 24.0),
-                    decoration: BoxDecoration(
-                      color: Colors.black87,
-                      borderRadius: BorderRadius.circular(24.0),
-                      border: Border.all(
-                        color: _getConfidenceColor(currencyState.confidence),
-                        width: 4.0,
-                      ),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Semantics(
-                          label: '${currencyState.denomination} Rupees',
-                          child: Text(
-                            '₹${currencyState.denomination}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 72.0,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 8.0),
-                        Text(
-                          'Confidence: ${(currencyState.confidence * 100).toInt()}%',
-                          style: TextStyle(
-                            color: _getConfidenceColor(currencyState.confidence),
-                            fontSize: 20.0,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+        body: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () async {
+            HapticFeedback.mediumImpact();
+            ref.read(ttsStateProvider.notifier).speak('Scanning banknote.');
+            _lastAnnouncedDenomination = null; // Force re-announce on manual tap
+            await _captureAndScan();
+          },
+          child: Stack(
+            children: [
+              const CameraPreviewWidget(),
+
+              const Align(
+                alignment: Alignment.topCenter,
+                child: StatusBanner(
+                  statusText: 'Point camera at a bank note',
+                  isActive: true,
+                  icon: Icons.currency_rupee,
                 ),
               ),
 
-            // Persistent Voice Assistant Bar for voice & touch access
-            const Positioned(
-              bottom: 24.0,
-              left: 16.0,
-              right: 16.0,
-              child: VoiceAssistantBar(),
-            ),
-          ],
+              if (currencyState.denomination != null)
+                Center(
+                  child: AnimatedOpacity(
+                    opacity: 1.0,
+                    duration: const Duration(milliseconds: 500),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 32.0, vertical: 24.0),
+                      decoration: BoxDecoration(
+                        color: Colors.black87,
+                        borderRadius: BorderRadius.circular(24.0),
+                        border: Border.all(
+                          color: _getConfidenceColor(currencyState.confidence),
+                          width: 4.0,
+                        ),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Semantics(
+                            label: '${currencyState.denomination} Rupees',
+                            child: Text(
+                              '₹${currencyState.denomination}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 72.0,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8.0),
+                          Text(
+                            'Confidence: ${(currencyState.confidence * 100).toInt()}%',
+                            style: TextStyle(
+                              color: _getConfidenceColor(currencyState.confidence),
+                              fontSize: 20.0,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+              const Positioned(
+                bottom: 24.0,
+                left: 16.0,
+                right: 16.0,
+                child: VoiceAssistantBar(),
+              ),
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
   }
 }

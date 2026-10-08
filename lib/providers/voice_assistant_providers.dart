@@ -86,10 +86,12 @@ class VoiceAssistantNotifier extends StateNotifier<VoiceAssistantState> {
     final ok = await _voiceService.initialize();
     state = state.copyWith(isAvailable: ok);
 
-    // Notify speech service of TTS playback for acoustic echo filtering and auto-resume
+    // Notify speech service of TTS playback to prevent mic collisions
     _ref.listen<TTSState>(ttsStateProvider, (previous, next) {
       _voiceService.notifyTtsSpeaking(next.isSpeaking, next.currentText);
-      if (previous?.isSpeaking == true && !next.isSpeaking) {
+      if (next.isSpeaking) {
+        _voiceService.pauseForTts();
+      } else if (previous?.isSpeaking == true && !next.isSpeaking) {
         // TTS just finished speaking! Immediately verify mic is active so user can speak next command
         _voiceService.resumeAfterTts();
       }

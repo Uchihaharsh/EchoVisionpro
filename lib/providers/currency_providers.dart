@@ -1,7 +1,6 @@
 import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:smart_glasses/services/currency_service.dart';
-import 'package:smart_glasses/providers/tts_providers.dart';
 
 /// Provider for CurrencyService
 final currencyServiceProvider = Provider<CurrencyService>((ref) {
@@ -45,9 +44,8 @@ class CurrencyState {
 /// StateNotifier for Currency logic
 class CurrencyStateNotifier extends StateNotifier<CurrencyState> {
   final CurrencyService _currencyService;
-  final Ref _ref;
 
-  CurrencyStateNotifier(this._currencyService, this._ref) : super(CurrencyState());
+  CurrencyStateNotifier(this._currencyService) : super(CurrencyState());
 
   /// Initializes currency model
   Future<void> initialize() async {
@@ -76,46 +74,39 @@ class CurrencyStateNotifier extends StateNotifier<CurrencyState> {
     state = state.copyWith(isClassifying: false);
   }
 
-  /// Processes raw JPEG bytes (from IMX378 USB Camera or snapshot)
-  Future<void> processImageBytes(Uint8List jpegBytes) async {
-    if (!_isScanning) return;
-
+  /// Processes raw JPEG bytes.
+  /// Returns the detected denomination string (e.g. "500") or null if none found.
+  /// The CALLER (screen) is responsible for announcing via TTS.
+  Future<String?> processImageBytes(Uint8List jpegBytes) async {
+    if (!_isScanning) return null;
     try {
       final result = await _currencyService.classifyImageBytes(jpegBytes);
-      if (!_isScanning) return;
-      
+      if (!_isScanning) return null;
       if (result != null && result.isConfident) {
         final label = result.denomination;
-
-        if (state.lastResult != label) {
-          state = state.copyWith(lastResult: label);
-          _ref.read(ttsStateProvider.notifier).speak(result.toSpeechText());
-        }
+        state = state.copyWith(lastResult: label);
+        return label;
       }
     } catch (e) {
       if (_isScanning) {
         state = state.copyWith(error: e.toString());
       }
     }
+    return null;
   }
 
-  /// Processes frame for currency
-  Future<void> processFrame(dynamic frameData) async {
-    if (!_isScanning || !state.isModelLoaded) return;
-    
+  /// Processes a camera frame for currency.
+  /// Returns the detected denomination string or null.
+  Future<String?> processFrame(dynamic frameData) async {
+    if (!_isScanning || !state.isModelLoaded) return null;
     state = state.copyWith(isClassifying: true);
-
     try {
       final result = await _currencyService.classifyCurrency(frameData);
-      if (!_isScanning) return;
-      
+      if (!_isScanning) return null;
       if (result != null && result.isConfident) {
         final label = result.denomination;
-
-        if (state.lastResult != label) {
-          state = state.copyWith(lastResult: label);
-          _ref.read(ttsStateProvider.notifier).speak(result.toSpeechText());
-        }
+        state = state.copyWith(lastResult: label);
+        return label;
       }
     } catch (e) {
       if (_isScanning) {
@@ -126,13 +117,11 @@ class CurrencyStateNotifier extends StateNotifier<CurrencyState> {
         state = state.copyWith(isClassifying: false);
       }
     }
+    return null;
   }
 }
 
 /// Provider exposing currency state notifier
 final currencyStateProvider = StateNotifierProvider<CurrencyStateNotifier, CurrencyState>((ref) {
-  return CurrencyStateNotifier(
-    ref.read(currencyServiceProvider),
-    ref,
-  );
+  return CurrencyStateNotifier(ref.read(currencyServiceProvider));
 });

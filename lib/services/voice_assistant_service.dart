@@ -159,14 +159,24 @@ class VoiceAssistantService {
     }
   }
 
-  /// Backward-compatible hooks that do not kill the microphone
   void pauseForTts() {
-    // Keep mic open so user can interrupt ("barge-in") at any time!
+    // Physically pause the microphone to prevent Android SpeechRecognizer error_busy crashes
+    // due to audio focus collisions or acoustic feedback loops during TTS playback.
+    _livenessWatchdog?.cancel();
+    _restartTimer?.cancel();
+    try {
+      if (_speech.isListening) {
+        _speech.stop();
+      }
+    } catch (_) {}
   }
 
   void resumeAfterTts() {
-    if (_continuousMode && !_speech.isListening) {
-      _restartContinuousListeningIfNeeded(delayMs: 250);
+    if (_continuousMode) {
+      _startLivenessWatchdog();
+      if (!_speech.isListening) {
+        _restartContinuousListeningIfNeeded(delayMs: 250);
+      }
     }
   }
 

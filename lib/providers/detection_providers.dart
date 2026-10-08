@@ -120,12 +120,13 @@ class DetectionStateNotifier extends StateNotifier<DetectionState> {
   DateTime? _lastDetectionTime;
   bool _isProcessingFrame = false;
 
-  /// Processes frame and detects objects
+  /// Processes frame and detects objects (stream path — no TTS, no spam)
   Future<void> processFrame(dynamic frameData) async {
     if (!state.isDetecting || _isProcessingFrame) return;
 
     final now = DateTime.now();
-    if (_lastDetectionTime != null && now.difference(_lastDetectionTime!).inMilliseconds < 350) {
+    if (_lastDetectionTime != null &&
+        now.difference(_lastDetectionTime!).inMilliseconds < 350) {
       return;
     }
     _lastDetectionTime = now;
@@ -142,34 +143,18 @@ class DetectionStateNotifier extends StateNotifier<DetectionState> {
     try {
       final cameraService = _ref.read(cameraServiceProvider);
       final rotation = cameraService.currentSource.sensorOrientation;
-      final results = await _detectionService.detectObjects(frameData, 300, 300, rotation: rotation);
+      final results =
+          await _detectionService.detectObjects(frameData, 300, 300, rotation: rotation);
       if (!state.isDetecting) return;
+      // Only update UI state — no TTS from stream path to prevent audio spam
       state = state.copyWith(results: results);
-
-      if (results.isNotEmpty) {
-        final nearest = results.first;
-        final now = DateTime.now();
-        final isDifferentObject = _lastSpokenObject != nearest.label;
-        final timeSinceLastSpeech = _lastSpeechTime != null
-            ? now.difference(_lastSpeechTime!)
-            : const Duration(seconds: 999);
-
-        final isTtsSpeaking = _ref.read(ttsStateProvider).isSpeaking;
-
-        if (!isTtsSpeaking && (isDifferentObject || timeSinceLastSpeech.inSeconds >= 8)) {
-          _lastSpokenObject = nearest.label;
-          _lastSpeechTime = now;
-          _ref.read(ttsStateProvider.notifier).speak('${nearest.label} detected');
-        }
-      } else {
-        _lastSpokenObject = null;
-      }
     } catch (e) {
       debugPrint('Detection error: $e');
     } finally {
       _isProcessingFrame = false;
     }
   }
+
 
   /// Processes a high-quality focused image file (from snapshot or tap-to-identify)
   Future<void> processImageFile(String filePath, {bool forceSpeak = false}) async {
