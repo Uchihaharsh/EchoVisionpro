@@ -293,14 +293,9 @@ class VoiceAssistantService {
             }
           }
         },
-        listenOptions: stt.SpeechListenOptions(
-          localeId: _cachedLocaleId,
-          listenFor: timeout,
-          pauseFor: const Duration(seconds: 5),
-          partialResults: true,
-          cancelOnError: false,
-          listenMode: stt.ListenMode.confirmation,
-        ),
+        localeId: _cachedLocaleId,
+        cancelOnError: true,
+        partialResults: true,
       );
     } catch (e) {
       debugPrint('Error starting listening: $e');
@@ -319,11 +314,6 @@ class VoiceAssistantService {
     _isListening = false;
     _listeningStatusController.add(false);
     _partialWordsController.add('');
-
-    // Re-arm listening seamlessly after command dispatch
-    Future.delayed(const Duration(milliseconds: 350), () {
-      _restartContinuousListeningIfNeeded();
-    });
   }
 
   /// Stops speech listening
