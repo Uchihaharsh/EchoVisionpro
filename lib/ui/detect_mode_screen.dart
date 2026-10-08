@@ -126,7 +126,12 @@ class _DetectModeScreenState extends ConsumerState<DetectModeScreen> {
     _scanTimer = null;
     _frameSub?.cancel();
     _frameSub = null;
-    ref.read(detectionStateProvider.notifier).stopDetection();
+    
+    // Capture notifier synchronously to safely call it after deactivate/dispose
+    final notifier = ref.read(detectionStateProvider.notifier);
+    Future.microtask(() {
+      notifier.stopDetection();
+    });
   }
 
   @override
