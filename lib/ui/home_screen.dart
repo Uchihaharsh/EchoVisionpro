@@ -27,7 +27,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(voiceAssistantStateProvider.notifier).setCurrentScreen('home');
       ref.read(ttsStateProvider.notifier).initialize();
-      ref.read(cameraStateProvider.notifier).initialize();
       _requestPermissionsAndStartAssistant();
     });
   }
@@ -39,15 +38,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       Permission.microphone,
     ].request();
 
-    // Auto-open microphone for hands-free "Hey Echo" continuous listening immediately
-    if (statuses[Permission.microphone]?.isGranted ?? false) {
+    final micGranted = statuses[Permission.microphone]?.isGranted ?? false;
+    final camGranted = statuses[Permission.camera]?.isGranted ?? false;
+
+    if (micGranted && camGranted) {
+      // Initialize Camera ONLY AFTER permissions are granted to prevent UVC plugin deadlock
+      ref.read(cameraStateProvider.notifier).initialize();
+      
       await ref.read(voiceAssistantStateProvider.notifier).startContinuousListening();
       ref.read(ttsStateProvider.notifier).speak(
         'Echo is listening. Say Hey Echo, double tap anywhere, or tap any button.',
       );
     } else {
       ref.read(ttsStateProvider.notifier).speak(
-        'Please grant microphone permission in phone settings to enable voice assistant.',
+        'Critical permissions were denied. Please go to your phone Settings, find Echo Vision, and allow both Microphone and Camera access for the app to function.',
+        priority: TTSPriority.critical,
       );
     }
   }

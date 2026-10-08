@@ -30,8 +30,8 @@ class TTSService {
   Future<void> initialize() async {
     try {
       await _tts.setLanguage('en-US');
-      await _tts.setSpeechRate(0.5);
-      await _tts.setPitch(1.0);
+      await _tts.setSpeechRate(0.5).timeout(const Duration(seconds: 2));
+      await _tts.setPitch(1.0).timeout(const Duration(seconds: 2));
 
       _tts.setStartHandler(() {
         _isSpeaking = true;

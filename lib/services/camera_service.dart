@@ -108,7 +108,7 @@ class NativeCameraSource implements CameraSource {
 
     try {
       if (!_controller!.value.isStreamingImages) {
-        final XFile file = await _controller!.takePicture();
+        final XFile file = await _controller!.takePicture().timeout(const Duration(seconds: 4));
         return await file.readAsBytes();
       }
     } catch (e) {
