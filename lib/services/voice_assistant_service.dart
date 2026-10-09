@@ -56,9 +56,16 @@ class VoiceAssistantService {
   // Acoustic echo tracking
   String? _lastTtsPhrase;
   DateTime? _lastTtsTime;
+  bool _isPausedForTts = false;
+  Timer? _ttsPauseSafetyTimer;
 
   // Active wake-word conversational window (e.g. after "Hey Echo" or mic button tap)
   DateTime? _wakeWordActiveUntil;
+
+  static final RegExp _wakeWordPattern = RegExp(
+    r'\b(hey echo|ok echo|okay echo|hi echo|hello echo|hey eco|ok eco|hi eco|hey eko|ok eko|hi eko|hey iko|eko|eco|ekho|aiko|he echo|hay echo|ok google|hey google|echo|ego|hey ego|akko|hey akko|aako|hey aako|heko|gecko|deco|niko|reco)\b',
+    caseSensitive: false,
+  );
 
   final StreamController<bool> _listeningStatusController = StreamController<bool>.broadcast();
   final StreamController<String> _partialWordsController = StreamController<String>.broadcast();
@@ -71,43 +78,52 @@ class VoiceAssistantService {
   Stream<String> get partialWordsStream => _partialWordsController.stream;
   Stream<VoiceCommand> get commandStream => _commandController.stream;
 
-  VoiceAssistantService() {
-    _startLivenessWatchdog();
-  }
+  VoiceAssistantService();
 
   /// Initializes the speech engine and caches the optimal locale
   Future<bool> initialize() async {
     if (_isInitialized) return true;
 
     try {
-      _isInitialized = await _speech.initialize(
-        onStatus: (status) {
-          debugPrint('SpeechToText status: $status');
-          if (status == 'listening') {
-            _isListening = true;
-            _listeningStatusController.add(true);
-          } else if (status == 'notListening') {
-            _isListening = false;
-            _listeningStatusController.add(false);
-          } else if (status == 'done') {
-            _isListening = false;
-            _listeningStatusController.add(false);
-            // Restart after Android cleanly finalizes previous session
-            _restartContinuousListeningIfNeeded(delayMs: 350);
-          }
-        },
-        onError: (SpeechRecognitionError error) {
-          debugPrint('SpeechToText error: ${error.errorMsg}');
-          _isListening = false;
-          _listeningStatusController.add(false);
-          final isNativeBusy = error.errorMsg == 'error_busy' || error.errorMsg == 'error_client';
-          _restartContinuousListeningIfNeeded(delayMs: isNativeBusy ? 950 : 500, forceDelay: isNativeBusy);
-        },
-      );
+      _isInitialized = await _speech
+          .initialize(
+            onStatus: (status) {
+              debugPrint('SpeechToText status: $status');
+              if (status == 'listening') {
+                _isListening = true;
+                _listeningStatusController.add(true);
+              } else if (status == 'notListening') {
+                _isListening = false;
+                _listeningStatusController.add(false);
+              } else if (status == 'done') {
+                _isListening = false;
+                _listeningStatusController.add(false);
+                // Wait 650ms so Android's delayed onError (~410ms after done) arrives first
+                // without triggering overlapping listen() calls.
+                if (!_isPausedForTts) {
+                  _restartContinuousListeningIfNeeded(delayMs: 650);
+                }
+              }
+            },
+            onError: (SpeechRecognitionError error) {
+              debugPrint('SpeechToText error: ${error.errorMsg}');
+              _isListening = false;
+              _listeningStatusController.add(false);
+              if (!_isPausedForTts) {
+                final isNativeBusy =
+                    error.errorMsg == 'error_busy' || error.errorMsg == 'error_client';
+                _restartContinuousListeningIfNeeded(
+                  delayMs: isNativeBusy ? 1000 : 600,
+                  forceDelay: true,
+                );
+              }
+            },
+          )
+          .timeout(const Duration(seconds: 5), onTimeout: () => false);
 
       if (_isInitialized) {
         try {
-          final locales = await _speech.locales();
+          final locales = await _speech.locales().timeout(const Duration(seconds: 2));
           for (var loc in locales) {
             if (loc.localeId == 'en_IN' || loc.localeId.startsWith('en_IN')) {
               _cachedLocaleId = loc.localeId;
@@ -129,16 +145,16 @@ class VoiceAssistantService {
   void _startLivenessWatchdog() {
     _livenessWatchdog?.cancel();
     _livenessWatchdog = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (_continuousMode && !_speech.isListening && !_isRestarting) {
+      if (_continuousMode && !_isPausedForTts && !_speech.isListening && !_isRestarting) {
         debugPrint('Voice watchdog: Recognizer idle. Re-arming continuous listening...');
-        _restartContinuousListeningIfNeeded(delayMs: 300);
+        _restartContinuousListeningIfNeeded(delayMs: 350);
       }
     });
   }
 
   /// Smoothly restarts speech listening without overloading the native Android recognizer
-  void _restartContinuousListeningIfNeeded({int delayMs = 350, bool forceDelay = false}) {
-    if (!_continuousMode) return;
+  void _restartContinuousListeningIfNeeded({int delayMs = 500, bool forceDelay = false}) {
+    if (!_continuousMode || _isPausedForTts) return;
     if (_isRestarting && !forceDelay) return;
 
     _isRestarting = true;
@@ -146,7 +162,7 @@ class VoiceAssistantService {
 
     _restartTimer = Timer(Duration(milliseconds: delayMs), () async {
       _isRestarting = false;
-      if (_continuousMode && !_speech.isListening) {
+      if (_continuousMode && !_isPausedForTts && !_speech.isListening) {
         await startListening(userInitiated: false);
       }
     });
@@ -163,8 +179,17 @@ class VoiceAssistantService {
   void pauseForTts() {
     // Physically pause the microphone to prevent Android SpeechRecognizer error_busy crashes
     // due to audio focus collisions or acoustic feedback loops during TTS playback.
+    _isPausedForTts = true;
+    _isRestarting = false;
     _livenessWatchdog?.cancel();
     _restartTimer?.cancel();
+    _ttsPauseSafetyTimer?.cancel();
+    _ttsPauseSafetyTimer = Timer(const Duration(seconds: 4), () {
+      if (_isPausedForTts) {
+        debugPrint('TTS pause safety timer expired; resuming voice assistant mic.');
+        resumeAfterTts();
+      }
+    });
     try {
       if (_speech.isListening) {
         _speech.stop();
@@ -173,10 +198,12 @@ class VoiceAssistantService {
   }
 
   void resumeAfterTts() {
+    _ttsPauseSafetyTimer?.cancel();
+    _isPausedForTts = false;
     if (_continuousMode) {
       _startLivenessWatchdog();
       if (!_speech.isListening) {
-        _restartContinuousListeningIfNeeded(delayMs: 250);
+        _restartContinuousListeningIfNeeded(delayMs: 300, forceDelay: true);
       }
     }
   }
@@ -187,6 +214,7 @@ class VoiceAssistantService {
     if (DateTime.now().difference(_lastTtsTime!).inSeconds > 4) return false;
 
     final clean = words.toLowerCase().trim();
+    if (clean.isEmpty) return true;
     // If the words contain an actionable command keyword, do NOT consider it an echo (user barge-in!)
     final hasCommandKeyword = RegExp(
       r'\b(echo|currency|money|rupee|read|text|object|detect|navigate|map|where|camera|home|back|help|stop|quiet|shut|silence|cancel)\b',
@@ -205,9 +233,18 @@ class VoiceAssistantService {
     Duration timeout = const Duration(seconds: 30),
     bool userInitiated = true,
   }) async {
+    if (!userInitiated && _isPausedForTts) return;
+
     if (!_isInitialized) {
       final ok = await initialize();
       if (!ok) return;
+    }
+
+    if (userInitiated) {
+      _isPausedForTts = false;
+      _ttsPauseSafetyTimer?.cancel();
+      _wakeWordActiveUntil = DateTime.now().add(const Duration(seconds: 20));
+      SystemSound.play(SystemSoundType.click);
     }
 
     if (_speech.isListening) {
@@ -219,11 +256,6 @@ class VoiceAssistantService {
     try {
       _isListening = true;
       _listeningStatusController.add(true);
-
-      if (userInitiated) {
-        _wakeWordActiveUntil = DateTime.now().add(const Duration(seconds: 10));
-        SystemSound.play(SystemSoundType.click);
-      }
 
       await _speech.listen(
         onResult: (result) {
@@ -239,35 +271,31 @@ class VoiceAssistantService {
 
           final now = DateTime.now();
           final isDebounced = _lastCommandExecutedTime == null ||
-              now.difference(_lastCommandExecutedTime!).inMilliseconds > 900;
+              now.difference(_lastCommandExecutedTime!).inMilliseconds > 800;
 
           if (!isDebounced) return;
 
           final cmd = parseCommand(words);
-          final hasWakeWord = RegExp(
-            r'\b(hey echo|ok echo|okay echo|hi echo|hello echo|hey eco|ok eco|hi eco|hey eko|ok eko|hi eko|hey iko|eko|eco|ekho|aiko|he echo|hay echo|ok google|hey google)\b',
-            caseSensitive: false,
-          ).hasMatch(words.toLowerCase());
+          final hasWakeWord = _wakeWordPattern.hasMatch(words.toLowerCase());
           final isWakeActive = hasWakeWord ||
               (_wakeWordActiveUntil != null && now.isBefore(_wakeWordActiveUntil!));
 
-          // If wake word was heard, prime the follow-up window
+          // If wake word was heard, prime the follow-up window for 20 seconds
           if (hasWakeWord) {
-            _wakeWordActiveUntil = now.add(const Duration(seconds: 10));
+            _wakeWordActiveUntil = now.add(const Duration(seconds: 20));
           }
 
           // Cancel previous debounce timer on ANY new speech activity
           _wakeWordDebounceTimer?.cancel();
 
-          // Case 0: User said ONLY "Hey Echo" -> Wait for final result OR a 650ms pause before answering!
-          // This prevents cutting off the user when they say "Hey Echo open currency" in one rapid sentence.
+          // Case 0: User said ONLY "Hey Echo" / "Echo" -> Wait for final result OR a 550ms pause before answering!
           if (cmd.type == VoiceCommandType.wakeWordPrompt) {
             if (result.finalResult) {
-              _wakeWordActiveUntil = now.add(const Duration(seconds: 10));
+              _wakeWordActiveUntil = now.add(const Duration(seconds: 20));
               _dispatchCommand(cmd);
             } else {
-              _wakeWordDebounceTimer = Timer(const Duration(milliseconds: 650), () {
-                _wakeWordActiveUntil = DateTime.now().add(const Duration(seconds: 10));
+              _wakeWordDebounceTimer = Timer(const Duration(milliseconds: 550), () {
+                _wakeWordActiveUntil = DateTime.now().add(const Duration(seconds: 20));
                 _dispatchCommand(cmd);
               });
             }
@@ -275,33 +303,38 @@ class VoiceAssistantService {
           }
 
           // Case 1: Actionable command (e.g. "open currency", "open object detection", "go home", "tell time", etc.)
+          // Execute immediately whether spoken with "Hey Echo"/"Echo" or spoken directly!
           if (cmd.type != VoiceCommandType.unknown) {
-            if (!hasWakeWord && !isWakeActive) {
-              return; // Ignore background noise that happens to match a command!
-            }
             _wakeWordDebounceTimer?.cancel();
-            _wakeWordActiveUntil = null;
+            _wakeWordActiveUntil = now.add(const Duration(seconds: 15));
             _dispatchCommand(cmd);
             return;
           }
 
           // Case 2: User said "Hey Echo" + conversational question, or tapped mic button
           if (result.finalResult && isWakeActive) {
-            _wakeWordActiveUntil = null;
+            _wakeWordActiveUntil = now.add(const Duration(seconds: 15));
             if (words.isNotEmpty) {
               _dispatchCommand(VoiceCommand(type: VoiceCommandType.unknown, rawText: words));
             }
           }
         },
+        // ignore: deprecated_member_use
+        listenFor: timeout,
+        // ignore: deprecated_member_use
+        pauseFor: const Duration(seconds: 6),
+        // ignore: deprecated_member_use
         localeId: _cachedLocaleId,
-        cancelOnError: true,
+        // ignore: deprecated_member_use
+        cancelOnError: false,
+        // ignore: deprecated_member_use
         partialResults: true,
       );
     } catch (e) {
       debugPrint('Error starting listening: $e');
       _isListening = false;
       _listeningStatusController.add(false);
-      _restartContinuousListeningIfNeeded(delayMs: 600);
+      _restartContinuousListeningIfNeeded(delayMs: 700, forceDelay: true);
     }
   }
 
@@ -320,6 +353,7 @@ class VoiceAssistantService {
   Future<void> stopListening() async {
     _continuousMode = false;
     _restartTimer?.cancel();
+    _ttsPauseSafetyTimer?.cancel();
     try {
       await _speech.cancel();
     } catch (_) {}
@@ -328,10 +362,13 @@ class VoiceAssistantService {
   }
 
   /// Enables continuous listening mode
-  void enableContinuousListening() {
+  Future<void> enableContinuousListening() async {
     _continuousMode = true;
-    if (!_speech.isListening) {
-      startListening(userInitiated: false);
+    final ok = await initialize();
+    if (!ok) return;
+    _startLivenessWatchdog();
+    if (!_isPausedForTts && !_speech.isListening) {
+      await startListening(userInitiated: false);
     }
   }
 
@@ -344,14 +381,10 @@ class VoiceAssistantService {
       return VoiceCommand(type: VoiceCommandType.unknown, rawText: input);
     }
 
-    final wakeWordRegex = RegExp(
-      r'\b(hey echo|ok echo|okay echo|hi echo|hello echo|hey eco|ok eco|hi eco|hey eko|ok eko|hi eko|hey iko|eko|eco|ekho|aiko|he echo|hay echo|ok google|hey google|echo|ego|hey ego|akko|hey akko|aako|hey aako)\b',
-      caseSensitive: false,
-    );
-    final hasWakeWord = wakeWordRegex.hasMatch(clean);
+    final hasWakeWord = _wakeWordPattern.hasMatch(clean);
 
     // Strip wake word for command analysis
-    String withoutWake = clean.replaceAll(wakeWordRegex, '').trim();
+    String withoutWake = clean.replaceAll(_wakeWordPattern, '').trim();
 
     // If user literally said ONLY the wake word
     if (hasWakeWord && withoutWake.isEmpty) {

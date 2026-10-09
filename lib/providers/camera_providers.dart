@@ -1,6 +1,10 @@
+import 'dart:async';
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:smart_glasses/services/camera_service.dart';
+import 'package:smart_glasses/providers/tts_providers.dart';
 
 /// Provider for the CameraService singleton
 final cameraServiceProvider = Provider<CameraService>((ref) {
@@ -36,7 +40,9 @@ class CameraState {
     bool? isStreaming,
     String? errorMessage,
     CameraController? controller,
+    bool clearController = false,
     int? textureId,
+    bool clearTextureId = false,
     bool? isUsbCamera,
     String? cameraName,
     double? aspectRatio,
@@ -44,9 +50,9 @@ class CameraState {
     return CameraState(
       isInitialized: isInitialized ?? this.isInitialized,
       isStreaming: isStreaming ?? this.isStreaming,
-      errorMessage: errorMessage ?? this.errorMessage,
-      controller: controller ?? this.controller,
-      textureId: textureId ?? this.textureId,
+      errorMessage: errorMessage,
+      controller: clearController ? null : (controller ?? this.controller),
+      textureId: clearTextureId ? null : (textureId ?? this.textureId),
       isUsbCamera: isUsbCamera ?? this.isUsbCamera,
       cameraName: cameraName ?? this.cameraName,
       aspectRatio: aspectRatio ?? this.aspectRatio,
@@ -54,28 +60,101 @@ class CameraState {
   }
 }
 
-/// StateNotifier for handling camera state transitions
+/// StateNotifier for handling camera state transitions and automatic USB hot-plugging
 class CameraStateNotifier extends StateNotifier<CameraState> {
   final CameraService _cameraService;
+  final Ref _ref;
+  StreamSubscription<UvcDeviceEvent>? _usbEventSub;
+  Timer? _usbPollTimer;
+  DateTime? _lastUsbAttemptTime;
+  bool _isBusy = false;
 
-  CameraStateNotifier(this._cameraService) : super(CameraState());
+  CameraStateNotifier(this._cameraService, this._ref) : super(CameraState());
+
+  void _syncStateFromSource({String? error}) {
+    final source = _cameraService.currentSource;
+    state = CameraState(
+      isInitialized: source.isInitialized,
+      isStreaming: source.isInitialized,
+      errorMessage: error,
+      controller: source.isUsbCamera ? null : source.controller,
+      textureId: source.isUsbCamera ? source.textureId : null,
+      isUsbCamera: source.isUsbCamera,
+      cameraName: source.name,
+      aspectRatio: source.aspectRatio,
+    );
+  }
+
+  void _startUsbHotplugMonitor() {
+    _usbEventSub ??= _cameraService.usbDeviceEvents.listen((event) async {
+      debugPrint('USB Device Event: ${event.type} (${event.device.productName})');
+      if (event.type == UvcDeviceEventType.attached && !state.isUsbCamera) {
+        _lastUsbAttemptTime = null;
+        await _autoSwitchToUsb();
+      } else if (event.type == UvcDeviceEventType.detached && state.isUsbCamera) {
+        await _autoSwitchToPhone();
+      }
+    });
+
+    _usbPollTimer ??= Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (_isBusy || !state.isInitialized) return;
+      final hasUsb = await _cameraService.hasUsbCameraAttached();
+      if (hasUsb && !state.isUsbCamera) {
+        final now = DateTime.now();
+        if (_lastUsbAttemptTime == null ||
+            now.difference(_lastUsbAttemptTime!).inSeconds >= 8) {
+          await _autoSwitchToUsb();
+        }
+      } else if (!hasUsb && state.isUsbCamera) {
+        await _autoSwitchToPhone();
+      }
+    });
+  }
+
+  Future<void> _autoSwitchToUsb() async {
+    if (_isBusy) return;
+    _isBusy = true;
+    _lastUsbAttemptTime = DateTime.now();
+    try {
+      await _cameraService.switchToUsbCamera();
+      _syncStateFromSource();
+      _ref.read(ttsStateProvider.notifier).speak('USB Smart Glasses camera connected');
+    } catch (e) {
+      debugPrint('Auto-switch to USB camera failed: $e');
+      _syncStateFromSource(error: e.toString());
+    } finally {
+      _isBusy = false;
+    }
+  }
+
+  Future<void> _autoSwitchToPhone() async {
+    if (_isBusy) return;
+    _isBusy = true;
+    try {
+      await _cameraService.switchToPhoneCamera();
+      _syncStateFromSource();
+      _ref.read(ttsStateProvider.notifier).speak('USB camera disconnected, switched to phone camera');
+    } catch (e) {
+      debugPrint('Auto-switch to Phone camera failed: $e');
+      _syncStateFromSource(error: e.toString());
+    } finally {
+      _isBusy = false;
+    }
+  }
 
   /// Initializes the camera service
   Future<void> initialize() async {
+    if (_isBusy) return;
+    _isBusy = true;
     try {
       await _cameraService.initialize();
-      final source = _cameraService.currentSource;
-      state = state.copyWith(
-        isInitialized: true,
-        errorMessage: null,
-        controller: source.controller,
-        textureId: source.textureId,
-        isUsbCamera: source.isUsbCamera,
-        cameraName: source.name,
-        aspectRatio: source.aspectRatio,
-      );
+      _syncStateFromSource();
+      _startUsbHotplugMonitor();
     } catch (e) {
       state = state.copyWith(isInitialized: false, errorMessage: e.toString());
+      _startUsbHotplugMonitor();
+    } finally {
+      _isBusy = false;
     }
   }
 
@@ -84,34 +163,27 @@ class CameraStateNotifier extends StateNotifier<CameraState> {
 
   /// Toggles between IMX378 USB Smart Glasses Camera and Built-in Phone Camera
   Future<void> toggleCameraSource() async {
+    if (_isBusy) return;
+    _isBusy = true;
+    _lastUsbAttemptTime = DateTime.now();
     try {
       await _cameraService.toggleCameraSource();
-      final source = _cameraService.currentSource;
-      state = state.copyWith(
-        isInitialized: true,
-        errorMessage: null,
-        controller: source.controller,
-        textureId: source.textureId,
-        isUsbCamera: source.isUsbCamera,
-        cameraName: source.name,
-        aspectRatio: source.aspectRatio,
-      );
+      _syncStateFromSource();
     } catch (e) {
-      state = state.copyWith(errorMessage: e.toString());
+      // Note: CameraService automatically recovers with Phone Camera if USB fails
+      _syncStateFromSource(error: e.toString());
+    } finally {
+      _isBusy = false;
     }
   }
 
   /// Starts the camera stream
   Future<void> startStream() async {
     if (!state.isInitialized) {
-      state = state.copyWith(errorMessage: 'Camera not initialized');
+      await initialize();
       return;
     }
-    try {
-      state = state.copyWith(isStreaming: true, errorMessage: null);
-    } catch (e) {
-      state = state.copyWith(isStreaming: false, errorMessage: e.toString());
-    }
+    state = state.copyWith(isStreaming: true, errorMessage: null);
   }
 
   /// Alias for startStream
@@ -119,20 +191,23 @@ class CameraStateNotifier extends StateNotifier<CameraState> {
 
   /// Stops the camera stream
   Future<void> stopStream() async {
-    try {
-      state = state.copyWith(isStreaming: false, errorMessage: null);
-    } catch (e) {
-      state = state.copyWith(errorMessage: e.toString());
-    }
+    state = state.copyWith(isStreaming: false, errorMessage: null);
   }
 
   /// Alias for stopStream
   Future<void> stopCamera() => stopStream();
+
+  @override
+  void dispose() {
+    _usbEventSub?.cancel();
+    _usbPollTimer?.cancel();
+    super.dispose();
+  }
 }
 
 /// Provider exposing the camera state notifier
 final cameraStateProvider = StateNotifierProvider<CameraStateNotifier, CameraState>((ref) {
-  return CameraStateNotifier(ref.read(cameraServiceProvider));
+  return CameraStateNotifier(ref.read(cameraServiceProvider), ref);
 });
 
 /// Stream provider for live camera frames

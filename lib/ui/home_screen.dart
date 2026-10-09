@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:smart_glasses/ui/widgets/accessible_button.dart';
+import 'package:smart_glasses/ui/widgets/camera_preview.dart';
 import 'package:smart_glasses/ui/widgets/voice_assistant_bar.dart';
 import 'package:smart_glasses/ui/widgets/gemini_wave_overlay.dart';
 import 'package:smart_glasses/ui/read_mode_screen.dart';
@@ -26,33 +27,43 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(voiceAssistantStateProvider.notifier).setCurrentScreen('home');
-      ref.read(ttsStateProvider.notifier).initialize();
       _requestPermissionsAndStartAssistant();
     });
   }
 
+  Future<bool> _ensurePermission(Permission perm) async {
+    try {
+      var status = await perm.status.timeout(const Duration(seconds: 3));
+      if (status.isGranted) return true;
+      status = await perm.request().timeout(const Duration(seconds: 8));
+      return status.isGranted;
+    } catch (e) {
+      debugPrint('Permission request error for $perm: $e');
+      return false;
+    }
+  }
+
   Future<void> _requestPermissionsAndStartAssistant() async {
-    final statuses = await [
-      Permission.camera,
-      Permission.location,
-      Permission.microphone,
-    ].request();
+    await ref.read(ttsStateProvider.notifier).initialize();
 
-    final micGranted = statuses[Permission.microphone]?.isGranted ?? false;
-    final camGranted = statuses[Permission.camera]?.isGranted ?? false;
+    final camGranted = await _ensurePermission(Permission.camera);
+    final micGranted = await _ensurePermission(Permission.microphone);
+    await _ensurePermission(Permission.location);
 
-    if (micGranted && camGranted) {
-      // Initialize Camera ONLY AFTER permissions are granted to prevent UVC plugin deadlock
-      ref.read(cameraStateProvider.notifier).initialize();
-      
+    if (!mounted) return;
+
+    if (camGranted) {
+      await ref.read(cameraStateProvider.notifier).initialize();
+    }
+
+    if (micGranted) {
       await ref.read(voiceAssistantStateProvider.notifier).startContinuousListening();
       ref.read(ttsStateProvider.notifier).speak(
-        'Echo is listening. Say Hey Echo, double tap anywhere, or tap any button.',
+        'Echo is ready. Say Hey Echo, or any command.',
       );
-    } else {
+    } else if (!camGranted || !micGranted) {
       ref.read(ttsStateProvider.notifier).speak(
-        'Critical permissions were denied. Please go to your phone Settings, find Echo Vision, and allow both Microphone and Camera access for the app to function.',
-        
+        'Please allow Microphone and Camera permissions for Echo Vision to function.',
       );
     }
   }
@@ -60,23 +71,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   void _navigateTo(BuildContext context, Widget screen, String screenKey, String announcement) {
     ref.read(voiceAssistantStateProvider.notifier).setCurrentScreen(screenKey);
     HapticFeedback.heavyImpact();
-    ref.read(ttsStateProvider.notifier).speak(announcement);
 
     // Pop all child screens back to root so previous screens run their dispose cleanly
     if (Navigator.canPop(context)) {
       Navigator.of(context).popUntil((route) => route.isFirst);
     }
 
-    // Push new screen cleanly
+    // Push new screen cleanly and restore 'home' state whenever it pops
     Navigator.push(
       context,
       MaterialPageRoute(builder: (context) => screen),
-    );
+    ).then((_) {
+      if (mounted) {
+        ref.read(voiceAssistantStateProvider.notifier).setCurrentScreen('home');
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final cameraState = ref.watch(cameraStateProvider);
+    final voiceState = ref.watch(voiceAssistantStateProvider);
+    final isHomeCurrent = (ModalRoute.of(context)?.isCurrent ?? true) &&
+        voiceState.currentScreen == 'home';
 
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
@@ -99,7 +116,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   child: const Text(
                     'VisionAssist',
                     style: TextStyle(
-                      fontSize: 34.0,
+                      fontSize: 32.0,
                       fontWeight: FontWeight.w900,
                       color: Colors.white,
                       shadows: [
@@ -116,7 +133,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 const Text(
                   'Gemini AI Smart Glasses Assistant',
                   style: TextStyle(
-                    fontSize: 16.0,
+                    fontSize: 15.0,
                     color: Colors.white70,
                     fontWeight: FontWeight.w500,
                   ),
@@ -131,9 +148,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   child: InkWell(
                     onTap: () async {
                       HapticFeedback.mediumImpact();
+                      ref.read(ttsStateProvider.notifier).speak('Switching camera...');
                       await ref.read(cameraStateProvider.notifier).toggleCameraSource();
-                      final updatedCamera = ref.read(cameraStateProvider).cameraName;
-                      ref.read(ttsStateProvider.notifier).speak('Switched to $updatedCamera');
+                      final updatedState = ref.read(cameraStateProvider);
+                      if (updatedState.errorMessage != null) {
+                        ref.read(ttsStateProvider.notifier).speak(
+                          'USB camera not detected. Using ${updatedState.cameraName}.',
+                        );
+                      } else {
+                        ref.read(ttsStateProvider.notifier).speak(
+                          'Switched to ${updatedState.cameraName}',
+                        );
+                      }
                     },
                     borderRadius: BorderRadius.circular(14.0),
                     child: Container(
@@ -158,8 +184,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           Flexible(
                             child: Text(
                               cameraState.isUsbCamera
-                                  ? 'Camera: IMX378 Smart Glasses'
-                                  : 'Camera: Phone (Tap to Switch)',
+                                  ? 'Camera: IMX378 Smart Glasses (Active)'
+                                  : 'Camera: Phone (Tap to Switch to USB)',
                               style: TextStyle(
                                 color: cameraState.isUsbCamera ? Colors.cyanAccent : Colors.white,
                                 fontSize: 15.0,
@@ -176,13 +202,30 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
                 const SizedBox(height: 8.0),
 
+                // Live Camera Feed Viewfinder on Home Screen (only mounted when on home screen)
+                if (isHomeCurrent)
+                  Container(
+                    height: 170.0,
+                    margin: const EdgeInsets.only(bottom: 8.0),
+                    decoration: BoxDecoration(
+                      color: Colors.black,
+                      borderRadius: BorderRadius.circular(16.0),
+                      border: Border.all(
+                        color: cameraState.isUsbCamera ? Colors.cyanAccent : Colors.white24,
+                        width: 2.0,
+                      ),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: const CameraPreviewWidget(),
+                  ),
+
                 // Voice Assistant Bar (Microphone activator + Live Status)
                 const VoiceAssistantBar(),
 
                 // Animated Gemini AI Wave / Thinking Overlay
                 const GeminiWaveOverlay(),
 
-                const SizedBox(height: 12.0),
+                const SizedBox(height: 10.0),
 
                 // 4 Accessible Primary Buttons (Touch Response 100% active)
                 AccessibleButton(

@@ -34,26 +34,23 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
       _isActive = true;
       ref.read(voiceAssistantStateProvider.notifier).setCurrentScreen('currency');
 
-      // Ensure camera is ready — only initialize if not already done
-      final camState = ref.read(cameraStateProvider);
-      if (!camState.isInitialized) {
-        await ref.read(cameraStateProvider.notifier).initializeCamera();
-      }
+      await ref.read(cameraStateProvider.notifier).initializeCamera();
 
       await ref.read(currencyStateProvider.notifier).initialize();
       ref.read(currencyStateProvider.notifier).startScanning();
 
-      // Wait for: (1) voice assistant TTS to finish, (2) old screen's deactivate() to run
-      await Future.delayed(const Duration(milliseconds: 1500));
-      if (!mounted || !_isActive) return;
-      ref.read(ttsStateProvider.notifier).speak('Currency mode active. Point camera at banknote.');
-
       _startFrameStream();
       _startScanLoop();
+
+      await Future.delayed(const Duration(milliseconds: 900));
+      if (!mounted || !_isActive) return;
+      ref.read(ttsStateProvider.notifier).speak('Currency mode active. Point camera at banknote.');
     });
   }
 
   void _startFrameStream() {
+    _frameSub?.cancel();
+    _frameSub = null;
     final cameraService = ref.read(cameraServiceProvider);
     final source = cameraService.currentSource;
     if (!source.isUsbCamera) {
@@ -66,13 +63,20 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
 
   void _startScanLoop() {
     _scanTimer?.cancel();
-    _scanTimer = Timer.periodic(const Duration(milliseconds: 3000), (_) async {
+    _scanTimer = Timer.periodic(const Duration(milliseconds: 1800), (_) async {
       if (!mounted || !_isActive) return;
 
       final cameraService = ref.read(cameraServiceProvider);
       if (cameraService.currentSource.isUsbCamera) {
+        if (_frameSub != null) {
+          _frameSub?.cancel();
+          _frameSub = null;
+        }
         await _captureAndScan();
       } else {
+        if (_frameSub == null) {
+          _startFrameStream();
+        }
         // Native camera uses continuous frame stream. Just read the state and speak it!
         final state = ref.read(currencyStateProvider);
         final result = state.lastResult;

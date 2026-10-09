@@ -166,20 +166,76 @@ class UvcCameraSource implements CameraSource {
   @override
   Future<void> initialize({ResolutionPreset resolution = ResolutionPreset.medium}) async {
     try {
-      await uvcCamera.ensureCameraPermission();
-      final devices = await uvcCamera.listUsbDevices();
+      try {
+        await uvcCamera.ensureCameraPermission().timeout(const Duration(seconds: 3));
+      } catch (_) {}
+
+      final devices = await uvcCamera.listUsbDevices().timeout(const Duration(seconds: 3));
       if (devices.isEmpty) {
         throw Exception('No IMX378 USB Camera detected on USB-C port.');
       }
 
       final device = devices.first;
-      await uvcCamera.openUsbDevice(device.deviceId);
+      debugPrint('Opening USB Camera deviceId=${device.deviceId}, name=${device.productName}');
+      final openCode = await uvcCamera
+          .openUsbDevice(device.deviceId)
+          .timeout(const Duration(seconds: 12));
+
+      if (openCode != 0) {
+        throw Exception('Failed to open USB camera (code $openCode): ${uvcCamera.lastError}');
+      }
 
       _textureId = await uvcCamera.createPreviewTexture();
-      
-      // Request highest quality HD mode from Sony IMX378 sensor
+
+      // Attach preview surface BEFORE starting stream so native ANativeWindow is ready immediately
+      await uvcCamera.attachPreviewTexture(
+        _textureId!,
+        width: 1280,
+        height: 720,
+      );
+
+      // Build prioritized mode list: prefer 720p / 480p / 1080p MJPEG @ 30fps over 12MP/4K modes
+      // that saturate Android USB 2.0 OTG bandwidth.
+      final allModes = uvcCamera.supportedModes();
+      debugPrint('USB Camera reported ${allModes.length} modes: ${allModes.map((m) => m.label).join(", ")}');
+
+      final prioritizedModes = allModes.where((m) => m.formatName != 'H264').toList();
+      int scoreMode(UvcCameraMode m) {
+        int score = 0;
+        // Prefer MJPEG over uncompressed YUYV
+        if (m.formatName == 'MJPEG') score += 1000;
+        // Ideal resolutions for fast, zero-stall Android USB OTG streaming & ML Kit
+        if (m.width == 1280 && m.height == 720) {
+          score += 500;
+        } else if (m.width == 640 && m.height == 480) {
+          score += 450;
+        } else if (m.width == 800 && m.height == 600) {
+          score += 400;
+        } else if (m.width == 1920 && m.height == 1080) {
+          score += 350;
+        } else if (m.width <= 1920 && m.height <= 1080) {
+          score += 250;
+        } else {
+          // Penalize >1080p (4K / 12MP) modes so they are only tried last
+          score -= 500;
+        }
+        if (m.fps >= 25 && m.fps <= 30) {
+          score += 100;
+        } else if (m.fps >= 15) {
+          score += 50;
+        }
+        return score;
+      }
+
+      prioritizedModes.sort((a, b) => scoreMode(b).compareTo(scoreMode(a)));
+
       final result = await uvcCamera.startPreviewAuto(
-        preference: UvcAutoPreviewPreference.quality,
+        candidates: prioritizedModes.isNotEmpty ? prioritizedModes : null,
+        preference: UvcAutoPreviewPreference.reliability,
+        policy: UvcPreviewPolicy.sequenceOnly,
+        consecutiveValidFrames: 1,
+        perModeTimeout: const Duration(milliseconds: 1800),
+        maxCandidates: 12,
       );
 
       if (result.success && result.mode != null) {
@@ -195,14 +251,22 @@ class UvcCameraSource implements CameraSource {
           width: width,
           height: height,
         );
+        uvcCamera.enableStallDetection();
         _isInitialized = true;
         debugPrint('IMX378 USB Camera (${width}x$height @ ${result.mode!.fps}fps) initialized successfully with textureId: $_textureId');
       } else {
-        throw Exception('Failed to start USB Camera preview stream');
+        throw Exception('Failed to start USB Camera preview stream: ${uvcCamera.lastError}');
       }
     } catch (e) {
       debugPrint('Error initializing UvcCameraSource: $e');
       _isInitialized = false;
+      try {
+        if (_textureId != null) {
+          await uvcCamera.disposePreviewTexture(_textureId!);
+          _textureId = null;
+        }
+        await uvcCamera.closeUsbDevice();
+      } catch (_) {}
       rethrow;
     }
   }
@@ -210,8 +274,14 @@ class UvcCameraSource implements CameraSource {
   @override
   Future<Uint8List?> extractFrame() async {
     try {
-      final picture = uvcCamera.takePicture();
-      return picture?.jpegBytes;
+      for (int attempt = 0; attempt < 3; attempt++) {
+        final picture = uvcCamera.takePicture(quality: 85);
+        if (picture != null && picture.jpegBytes.isNotEmpty) {
+          return picture.jpegBytes;
+        }
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      return null;
     } catch (e) {
       debugPrint('Error taking picture from USB Camera: $e');
       return null;
@@ -221,6 +291,7 @@ class UvcCameraSource implements CameraSource {
   @override
   Future<void> dispose() async {
     try {
+      uvcCamera.disableStallDetection();
       uvcCamera.stopPreview();
       if (_textureId != null) {
         await uvcCamera.disposePreviewTexture(_textureId!);
@@ -236,13 +307,14 @@ class UvcCameraSource implements CameraSource {
 
 class CameraService {
   CameraSource _currentSource = NativeCameraSource();
+  bool _isSwitching = false;
 
   CameraSource get currentSource => _currentSource;
+  Stream<UvcDeviceEvent> get usbDeviceEvents => uvcCamera.deviceEvents;
 
   Future<bool> hasUsbCameraAttached() async {
     try {
-      await uvcCamera.ensureCameraPermission();
-      final devices = await uvcCamera.listUsbDevices();
+      final devices = await uvcCamera.listUsbDevices().timeout(const Duration(seconds: 2));
       return devices.isNotEmpty;
     } catch (e) {
       return false;
@@ -250,35 +322,70 @@ class CameraService {
   }
 
   Future<void> initialize({ResolutionPreset resolution = ResolutionPreset.medium}) async {
-    if (_currentSource.isInitialized) {
-      debugPrint('Camera is already initialized, keeping stream active.');
-      return;
-    }
-    // Check if external IMX378 USB Camera is connected
-    final hasUsb = await hasUsbCameraAttached();
-    if (hasUsb) {
-      try {
-        _currentSource = UvcCameraSource();
-        await _currentSource.initialize(resolution: resolution);
-        return;
-      } catch (e) {
-        debugPrint('Falling back to native phone camera: $e');
-        _currentSource = NativeCameraSource();
+    if (_isSwitching) return;
+    _isSwitching = true;
+    try {
+      final hasUsb = await hasUsbCameraAttached();
+
+      // If USB camera is attached and we are not already using it cleanly, switch to USB!
+      if (hasUsb) {
+        if (_currentSource.isInitialized && _currentSource.isUsbCamera) {
+          return;
+        }
+        try {
+          if (_currentSource.isInitialized) {
+            await _currentSource.dispose();
+          }
+          _currentSource = UvcCameraSource();
+          await _currentSource.initialize(resolution: resolution);
+          return;
+        } catch (e) {
+          debugPrint('Falling back to native phone camera: $e');
+          _currentSource = NativeCameraSource();
+        }
       }
+
+      // Otherwise use native phone camera
+      if (_currentSource.isInitialized && !_currentSource.isUsbCamera) {
+        return;
+      }
+      if (_currentSource.isInitialized) {
+        await _currentSource.dispose();
+      }
+      _currentSource = NativeCameraSource();
+      await _currentSource.initialize(resolution: resolution);
+    } finally {
+      _isSwitching = false;
     }
-    await _currentSource.initialize(resolution: resolution);
   }
 
   Future<void> switchToUsbCamera({ResolutionPreset resolution = ResolutionPreset.medium}) async {
-    await _currentSource.dispose();
-    _currentSource = UvcCameraSource();
-    await _currentSource.initialize(resolution: resolution);
+    if (_isSwitching) return;
+    _isSwitching = true;
+    try {
+      await _currentSource.dispose();
+      _currentSource = UvcCameraSource();
+      await _currentSource.initialize(resolution: resolution);
+    } catch (e) {
+      debugPrint('switchToUsbCamera failed ($e), recovering with phone camera...');
+      _currentSource = NativeCameraSource();
+      await _currentSource.initialize(resolution: resolution);
+      rethrow;
+    } finally {
+      _isSwitching = false;
+    }
   }
 
   Future<void> switchToPhoneCamera({ResolutionPreset resolution = ResolutionPreset.medium}) async {
-    await _currentSource.dispose();
-    _currentSource = NativeCameraSource();
-    await _currentSource.initialize(resolution: resolution);
+    if (_isSwitching) return;
+    _isSwitching = true;
+    try {
+      await _currentSource.dispose();
+      _currentSource = NativeCameraSource();
+      await _currentSource.initialize(resolution: resolution);
+    } finally {
+      _isSwitching = false;
+    }
   }
 
   Future<void> toggleCameraSource({ResolutionPreset resolution = ResolutionPreset.medium}) async {

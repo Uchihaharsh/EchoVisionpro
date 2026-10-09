@@ -1,9 +1,9 @@
 import 'dart:io';
-import 'dart:ui';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:smart_glasses/core/utils/image_utils.dart';
 import 'package:smart_glasses/models/currency_result.dart';
 
 /// Service responsible for recognizing currency notes.
@@ -113,28 +113,7 @@ class CurrencyService {
   }
 
   InputImage? _buildInputImage(CameraImage image) {
-    try {
-      final WriteBuffer allBytes = WriteBuffer();
-      for (final Plane plane in image.planes) {
-        allBytes.putUint8List(plane.bytes);
-      }
-      final bytes = allBytes.done().buffer.asUint8List();
-
-      final Size imageSize = Size(image.width.toDouble(), image.height.toDouble());
-      const InputImageRotation imageRotation = InputImageRotation.rotation90deg;
-      final format = InputImageFormatValue.fromRawValue(image.format.raw) ?? InputImageFormat.nv21;
-
-      final inputImageData = InputImageMetadata(
-        size: imageSize,
-        rotation: imageRotation,
-        format: format,
-        bytesPerRow: image.planes[0].bytesPerRow,
-      );
-
-      return InputImage.fromBytes(bytes: bytes, metadata: inputImageData);
-    } catch (e) {
-      return null;
-    }
+    return ImageUtils.buildInputImage(image, rotation: 90);
   }
 
   void dispose() {

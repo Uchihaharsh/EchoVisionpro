@@ -29,8 +29,9 @@ class TTSService {
 
   Future<void> initialize() async {
     try {
+      await _tts.awaitSpeakCompletion(true);
       await _tts.setLanguage('en-US');
-      await _tts.setSpeechRate(0.5).timeout(const Duration(seconds: 2));
+      await _tts.setSpeechRate(0.52).timeout(const Duration(seconds: 2));
       await _tts.setPitch(1.0).timeout(const Duration(seconds: 2));
 
       _tts.setStartHandler(() {
@@ -103,6 +104,15 @@ class TTSService {
         _speakingStateController.add(true);
         _armWatchdog(text);
         await _tts.speak(text);
+        if (_ttsSessionId == currentSession && _isSpeaking) {
+          _speechWatchdogTimer?.cancel();
+          _isSpeaking = false;
+          if (_queue.isEmpty) {
+            _speakingStateController.add(false);
+          } else {
+            _processQueue();
+          }
+        }
         return;
       }
 
@@ -141,11 +151,22 @@ class TTSService {
     }
 
     try {
+      _ttsSessionId++;
+      final currentSession = _ttsSessionId;
       final item = _queue.removeFirst();
       _isSpeaking = true;
       _speakingStateController.add(true);
       _armWatchdog(item.text);
       await _tts.speak(item.text);
+      if (_ttsSessionId == currentSession && _isSpeaking) {
+        _speechWatchdogTimer?.cancel();
+        _isSpeaking = false;
+        if (_queue.isEmpty) {
+          _speakingStateController.add(false);
+        } else {
+          _processQueue();
+        }
+      }
     } catch (e) {
       debugPrint('Error processing TTS queue: $e');
       _speechWatchdogTimer?.cancel();

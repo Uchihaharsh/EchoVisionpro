@@ -1,8 +1,129 @@
+import 'dart:ui';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as img;
 
 class ImageUtils {
+  /// Converts any Android CameraImage (YUV_420_888 3-plane, NV21 2-plane, or 1-plane)
+  /// into a tightly-packed NV21 byte array required by Google ML Kit's InputImageConverter on Android.
+  static Uint8List? convertCameraImageToNV21(CameraImage image) {
+    try {
+      final int width = image.width;
+      final int height = image.height;
+      if (width <= 0 || height <= 0 || image.planes.isEmpty) return null;
+
+      final int ySize = width * height;
+      final int uvSize = (width ~/ 2) * (height ~/ 2) * 2;
+      final Uint8List nv21 = Uint8List(ySize + uvSize);
+
+      // 1-plane already packed NV21
+      if (image.planes.length == 1) {
+        final bytes = image.planes[0].bytes;
+        final copyLen = bytes.length < nv21.length ? bytes.length : nv21.length;
+        nv21.setRange(0, copyLen, bytes);
+        return nv21;
+      }
+
+      // Copy Y plane (accounting for row stride padding)
+      final Plane yPlane = image.planes[0];
+      final Uint8List yBytes = yPlane.bytes;
+      final int yRowStride = yPlane.bytesPerRow;
+
+      if (yRowStride == width && yBytes.length >= ySize) {
+        nv21.setRange(0, ySize, yBytes);
+      } else {
+        int dstOffset = 0;
+        for (int row = 0; row < height; row++) {
+          final int srcOffset = row * yRowStride;
+          if (srcOffset + width <= yBytes.length) {
+            nv21.setRange(dstOffset, dstOffset + width, yBytes, srcOffset);
+          }
+          dstOffset += width;
+        }
+      }
+
+      final int uvWidth = width ~/ 2;
+      final int uvHeight = height ~/ 2;
+      int uvDstOffset = ySize;
+
+      // 2-plane (Y + interleaved UV/VU)
+      if (image.planes.length == 2) {
+        final Plane uvPlane = image.planes[1];
+        final Uint8List uvBytes = uvPlane.bytes;
+        final int uvRowStride = uvPlane.bytesPerRow;
+        final int rowBytes = uvWidth * 2;
+
+        if (uvRowStride == rowBytes && uvBytes.length >= uvSize) {
+          nv21.setRange(ySize, ySize + uvSize, uvBytes);
+        } else {
+          for (int row = 0; row < uvHeight; row++) {
+            final int srcOffset = row * uvRowStride;
+            final int avail = (srcOffset + rowBytes <= uvBytes.length)
+                ? rowBytes
+                : (uvBytes.length - srcOffset).clamp(0, rowBytes);
+            if (avail > 0) {
+              nv21.setRange(uvDstOffset, uvDstOffset + avail, uvBytes, srcOffset);
+            }
+            uvDstOffset += rowBytes;
+          }
+        }
+        return nv21;
+      }
+
+      // 3-plane YUV_420_888 (Y, U, V) -> interleave V then U for NV21
+      final Plane uPlane = image.planes[1];
+      final Plane vPlane = image.planes[2];
+      final Uint8List uBytes = uPlane.bytes;
+      final Uint8List vBytes = vPlane.bytes;
+      final int uRowStride = uPlane.bytesPerRow;
+      final int vRowStride = vPlane.bytesPerRow;
+      final int uPixelStride = uPlane.bytesPerPixel ?? 1;
+      final int vPixelStride = vPlane.bytesPerPixel ?? 1;
+
+      for (int row = 0; row < uvHeight; row++) {
+        final int uRowOffset = row * uRowStride;
+        final int vRowOffset = row * vRowStride;
+        for (int col = 0; col < uvWidth; col++) {
+          final int uIdx = uRowOffset + col * uPixelStride;
+          final int vIdx = vRowOffset + col * vPixelStride;
+          nv21[uvDstOffset++] = (vIdx < vBytes.length) ? vBytes[vIdx] : 128;
+          nv21[uvDstOffset++] = (uIdx < uBytes.length) ? uBytes[uIdx] : 128;
+        }
+      }
+
+      return nv21;
+    } catch (e) {
+      debugPrint('Error converting CameraImage to NV21: $e');
+      return null;
+    }
+  }
+
+  /// Builds a Google ML Kit [InputImage] from a [CameraImage], always using NV21 format
+  /// so Android's InputImageConverter never rejects YUV_420_888 frames.
+  static InputImage? buildInputImage(CameraImage image, {int rotation = 90}) {
+    try {
+      final nv21Bytes = convertCameraImageToNV21(image);
+      if (nv21Bytes == null || nv21Bytes.isEmpty) return null;
+
+      final Size imageSize = Size(image.width.toDouble(), image.height.toDouble());
+      final InputImageRotation imageRotation =
+          InputImageRotationValue.fromRawValue(rotation) ?? InputImageRotation.rotation90deg;
+
+      final inputImageData = InputImageMetadata(
+        size: imageSize,
+        rotation: imageRotation,
+        format: InputImageFormat.nv21,
+        bytesPerRow: image.width,
+      );
+
+      return InputImage.fromBytes(bytes: nv21Bytes, metadata: inputImageData);
+    } catch (e) {
+      debugPrint('Error building InputImage: $e');
+      return null;
+    }
+  }
+
   /// Converts a CameraImage (NV21 2-plane, YUV420 3-plane, or single-plane) to JPEG bytes.
   static Uint8List? convertYUV420ToRGB(CameraImage image) {
     try {
@@ -144,10 +265,6 @@ class ImageUtils {
 
   /// Extracts the raw bytes of the CameraImage for ML Kit processing.
   static Uint8List getCameraImageBytes(CameraImage cameraImage) {
-    final WriteBuffer allBytes = WriteBuffer();
-    for (final Plane plane in cameraImage.planes) {
-      allBytes.putUint8List(plane.bytes);
-    }
-    return allBytes.done().buffer.asUint8List();
+    return convertCameraImageToNV21(cameraImage) ?? Uint8List(0);
   }
 }

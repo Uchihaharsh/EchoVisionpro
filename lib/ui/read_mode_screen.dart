@@ -56,24 +56,22 @@ class _ReadModeScreenState extends ConsumerState<ReadModeScreen> {
       _isActive = true;
       ref.read(voiceAssistantStateProvider.notifier).setCurrentScreen('read');
 
-      final camState = ref.read(cameraStateProvider);
-      if (!camState.isInitialized) {
-        await ref.read(cameraStateProvider.notifier).initializeCamera();
-      }
+      await ref.read(cameraStateProvider.notifier).initializeCamera();
 
       ref.read(ocrStateProvider.notifier).startContinuousScan();
 
-      // Wait for: (1) voice assistant TTS to finish, (2) old screen's deactivate() to run
-      await Future.delayed(const Duration(milliseconds: 1500));
-      if (!mounted || !_isActive) return;
-      ref.read(ttsStateProvider.notifier).speak('Read mode active. Point camera at text.');
-
       _startFrameStream();
       _startScanLoop();
+
+      await Future.delayed(const Duration(milliseconds: 900));
+      if (!mounted || !_isActive) return;
+      ref.read(ttsStateProvider.notifier).speak('Read mode active. Point camera at text.');
     });
   }
 
   void _startFrameStream() {
+    _frameSub?.cancel();
+    _frameSub = null;
     final cameraService = ref.read(cameraServiceProvider);
     final source = cameraService.currentSource;
     if (!source.isUsbCamera) {
@@ -86,14 +84,20 @@ class _ReadModeScreenState extends ConsumerState<ReadModeScreen> {
 
   void _startScanLoop() {
     _scanTimer?.cancel();
-    _scanTimer = Timer.periodic(const Duration(milliseconds: 3500), (_) async {
+    _scanTimer = Timer.periodic(const Duration(milliseconds: 1800), (_) async {
       if (_isContinuous && mounted && _isActive) {
         final cameraService = ref.read(cameraServiceProvider);
-        
+
         if (cameraService.currentSource.isUsbCamera) {
+          if (_frameSub != null) {
+            _frameSub?.cancel();
+            _frameSub = null;
+          }
           await _captureAndScan();
+        } else if (_frameSub == null) {
+          _startFrameStream();
         }
-        
+
         // After scan (or from native continuous stream), check for new text to announce
         if (!mounted || !_isActive) return;
         final ocrState = ref.read(ocrStateProvider);

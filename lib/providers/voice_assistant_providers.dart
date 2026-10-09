@@ -82,10 +82,7 @@ class VoiceAssistantNotifier extends StateNotifier<VoiceAssistantState> {
     _init();
   }
 
-  Future<void> _init() async {
-    final ok = await _voiceService.initialize();
-    state = state.copyWith(isAvailable: ok);
-
+  void _init() {
     // Notify speech service of TTS playback to prevent mic collisions
     _ref.listen<TTSState>(ttsStateProvider, (previous, next) {
       _voiceService.notifyTtsSpeaking(next.isSpeaking, next.currentText);
@@ -252,7 +249,8 @@ class VoiceAssistantNotifier extends StateNotifier<VoiceAssistantState> {
 
     switch (cmd.type) {
       case VoiceCommandType.wakeWordPrompt:
-        _ref.read(ttsStateProvider.notifier).speak("Yes, I'm listening.");
+        _ref.read(ttsStateProvider.notifier).speak("Yes?", interrupt: true);
+        state = state.copyWith(status: "Listening for command...");
         break;
 
       case VoiceCommandType.stopSpeaking:
@@ -351,18 +349,22 @@ class VoiceAssistantNotifier extends StateNotifier<VoiceAssistantState> {
     _ref.read(ttsStateProvider.notifier).stop();
     HapticFeedback.heavyImpact();
     state = state.copyWith(currentScreen: screenKey);
-    _ref.read(ttsStateProvider.notifier).speak(announcement, interrupt: true);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final nav = appNavigatorKey.currentState;
       if (nav != null) {
+        final Future<dynamic> routeFuture;
         if (nav.canPop()) {
           // Atomic screen swap: replaces current feature screen with new feature screen!
-          // Disposes old screen cleanly without route animation collisions or stack overflow.
-          nav.pushReplacement(MaterialPageRoute(builder: (_) => screen));
+          routeFuture = nav.pushReplacement(MaterialPageRoute(builder: (_) => screen));
         } else {
-          nav.push(MaterialPageRoute(builder: (_) => screen));
+          routeFuture = nav.push(MaterialPageRoute(builder: (_) => screen));
         }
+        routeFuture.then((_) {
+          if (!(appNavigatorKey.currentState?.canPop() ?? false)) {
+            setCurrentScreen('home');
+          }
+        });
       }
     });
   }
@@ -386,9 +388,10 @@ class VoiceAssistantNotifier extends StateNotifier<VoiceAssistantState> {
     });
   }
 
-  /// Starts continuous listening on app launch
+  /// Starts continuous listening on app launch (after permissions are granted)
   Future<void> startContinuousListening() async {
-    _voiceService.enableContinuousListening();
+    await _voiceService.enableContinuousListening();
+    state = state.copyWith(isAvailable: _voiceService.isInitialized);
   }
 
   /// Manual tap to force listen immediately with sound and haptics
@@ -397,6 +400,7 @@ class VoiceAssistantNotifier extends StateNotifier<VoiceAssistantState> {
     SystemSound.play(SystemSoundType.click);
     state = state.copyWith(status: 'Listening...');
     await _voiceService.startListening();
+    state = state.copyWith(isAvailable: _voiceService.isInitialized);
   }
 
   /// Stops listening

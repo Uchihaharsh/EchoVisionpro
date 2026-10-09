@@ -19,15 +19,18 @@ class CameraPreviewWidget extends ConsumerWidget {
         fit: StackFit.expand,
         children: [
           // 1. External IMX378 USB-C Camera Preview with Precise Aspect Ratio
-          if (cameraState.isInitialized && cameraState.textureId != null)
+          if (cameraState.isInitialized && cameraState.isUsbCamera && cameraState.textureId != null)
             Center(
               child: AspectRatio(
                 aspectRatio: cameraState.aspectRatio > 0 ? cameraState.aspectRatio : (16 / 9),
                 child: Texture(textureId: cameraState.textureId!),
               ),
             )
-          // 2. Built-in Smartphone Camera Preview
-          else if (cameraState.isInitialized && cameraState.controller != null)
+          // 2. Built-in Smartphone Camera Preview (guarded against disposed controller)
+          else if (cameraState.isInitialized &&
+              !cameraState.isUsbCamera &&
+              cameraState.controller != null &&
+              cameraState.controller!.value.isInitialized)
             CameraPreview(cameraState.controller!)
           // 3. Fallback Placeholder
           else

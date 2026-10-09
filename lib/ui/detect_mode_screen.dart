@@ -33,29 +33,26 @@ class _DetectModeScreenState extends ConsumerState<DetectModeScreen> {
       _isActive = true;
       ref.read(voiceAssistantStateProvider.notifier).setCurrentScreen('detect');
 
-      // Ensure camera is ready — only initialize if not already done
-      final camState = ref.read(cameraStateProvider);
-      if (!camState.isInitialized) {
-        await ref.read(cameraStateProvider.notifier).initializeCamera();
-      }
+      // Ensure camera is ready and check if USB camera was newly attached
+      await ref.read(cameraStateProvider.notifier).initializeCamera();
 
       await ref.read(detectionStateProvider.notifier).initialize();
       ref.read(detectionStateProvider.notifier).startDetection();
 
-      // Wait for: (1) voice assistant TTS to finish, (2) old screen's deactivate() to run
-      await Future.delayed(const Duration(milliseconds: 1500));
-      if (!mounted || !_isActive) return;
-      ref.read(ttsStateProvider.notifier).speak('Object Detection active. Tap to analyze.');
-
       _startFrameStream();
       _startScanLoop();
+
+      await Future.delayed(const Duration(milliseconds: 900));
+      if (!mounted || !_isActive) return;
+      ref.read(ttsStateProvider.notifier).speak('Object Detection active. Tap to analyze.');
     });
   }
 
   /// Subscribe to native camera frame stream ONLY while this screen is active
   void _startFrameStream() {
+    _frameSub?.cancel();
+    _frameSub = null;
     final cameraService = ref.read(cameraServiceProvider);
-    // Only subscribe to frame stream for phone camera (USB camera uses snapshot timer)
     final source = cameraService.currentSource;
     if (!source.isUsbCamera) {
       _frameSub = source.frameStream.listen((image) {
@@ -70,15 +67,21 @@ class _DetectModeScreenState extends ConsumerState<DetectModeScreen> {
 
   void _startScanLoop() {
     _scanTimer?.cancel();
-    _scanTimer = Timer.periodic(const Duration(milliseconds: 3500), (_) async {
+    _scanTimer = Timer.periodic(const Duration(milliseconds: 1800), (_) async {
       if (!mounted || !_isActive) return;
-      
+
       final cameraService = ref.read(cameraServiceProvider);
       if (cameraService.currentSource.isUsbCamera) {
-        // USB camera path: periodic snapshot every 3.5 seconds
+        if (_frameSub != null) {
+          _frameSub?.cancel();
+          _frameSub = null;
+        }
+        // USB camera path: periodic snapshot
         await _captureAndDetect(forceSpeak: false, useCloudGemini: false);
+      } else if (_frameSub == null) {
+        _startFrameStream();
       }
-      
+
       // Auto-announce if object changed or 10s passed
       if (!mounted || !_isActive) return;
       final results = ref.read(detectionStateProvider).results;
