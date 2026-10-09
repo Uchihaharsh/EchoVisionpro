@@ -29,12 +29,13 @@ class CurrencyState {
   CurrencyState copyWith({
     bool? isClassifying,
     String? lastResult,
+    bool clearResult = false,
     bool? isModelLoaded,
     String? error,
   }) {
     return CurrencyState(
       isClassifying: isClassifying ?? this.isClassifying,
-      lastResult: lastResult ?? this.lastResult,
+      lastResult: clearResult ? null : (lastResult ?? this.lastResult),
       isModelLoaded: isModelLoaded ?? this.isModelLoaded,
       error: error ?? this.error,
     );
@@ -51,9 +52,9 @@ class CurrencyStateNotifier extends StateNotifier<CurrencyState> {
   Future<void> initialize() async {
     try {
       await _currencyService.initialize();
-      state = state.copyWith(isModelLoaded: true);
+      state = state.copyWith(isModelLoaded: true, isClassifying: false, clearResult: true);
     } catch (e) {
-      state = state.copyWith(isModelLoaded: false, error: e.toString());
+      state = state.copyWith(isModelLoaded: false, isClassifying: false, error: e.toString());
     }
   }
 
@@ -62,10 +63,10 @@ class CurrencyStateNotifier extends StateNotifier<CurrencyState> {
 
   bool _isScanning = false;
 
-  /// Starts scanning
+  /// Starts scanning (do NOT set isClassifying=true here, or processFrame will early-return!)
   void startScanning() {
     _isScanning = true;
-    state = state.copyWith(isClassifying: true);
+    state = state.copyWith(isClassifying: false, clearResult: true);
   }
 
   /// Stops scanning
@@ -76,7 +77,6 @@ class CurrencyStateNotifier extends StateNotifier<CurrencyState> {
 
   /// Processes raw JPEG bytes.
   /// Returns the detected denomination string (e.g. "500") or null if none found.
-  /// The CALLER (screen) is responsible for announcing via TTS.
   Future<String?> processImageBytes(Uint8List jpegBytes) async {
     if (!_isScanning) return null;
     try {
@@ -95,17 +95,27 @@ class CurrencyStateNotifier extends StateNotifier<CurrencyState> {
     return null;
   }
 
+  bool _isProcessingFrame = false;
+  DateTime? _lastFrameTime;
+
   /// Processes a camera frame for currency.
   /// Returns the detected denomination string or null.
   Future<String?> processFrame(dynamic frameData) async {
-    if (!_isScanning || !state.isModelLoaded || state.isClassifying) return null;
-    state = state.copyWith(isClassifying: true);
+    if (!_isScanning || !state.isModelLoaded || _isProcessingFrame) return null;
+    final now = DateTime.now();
+    if (_lastFrameTime != null && now.difference(_lastFrameTime!).inMilliseconds < 250) {
+      return null;
+    }
+    _lastFrameTime = now;
+    _isProcessingFrame = true;
     try {
       final result = await _currencyService.classifyCurrency(frameData);
       if (!_isScanning) return null;
       if (result != null && result.isConfident) {
         final label = result.denomination;
-        state = state.copyWith(lastResult: label);
+        if (state.lastResult != label) {
+          state = state.copyWith(lastResult: label);
+        }
         return label;
       }
     } catch (e) {
@@ -113,9 +123,7 @@ class CurrencyStateNotifier extends StateNotifier<CurrencyState> {
         state = state.copyWith(error: e.toString());
       }
     } finally {
-      if (_isScanning) {
-        state = state.copyWith(isClassifying: false);
-      }
+      _isProcessingFrame = false;
     }
     return null;
   }

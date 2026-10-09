@@ -24,6 +24,7 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
   StreamSubscription<dynamic>? _frameSub;
   bool _isActive = false;
   String? _lastAnnouncedDenomination;
+  DateTime? _lastAnnouncedTime;
 
   @override
   void initState() {
@@ -42,10 +43,27 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
       _startFrameStream();
       _startScanLoop();
 
-      await Future.delayed(const Duration(milliseconds: 900));
       if (!mounted || !_isActive) return;
-      ref.read(ttsStateProvider.notifier).speak('Currency mode active. Point camera at banknote.');
+      ref.read(ttsStateProvider.notifier).speak(
+        'Currency mode active. Point camera at banknote.',
+        interrupt: true,
+      );
     });
+  }
+
+  void _announceDenominationIfNeeded(String denom, {bool force = false}) {
+    if (!mounted || !_isActive) return;
+    final now = DateTime.now();
+    final isSameDenom = denom == _lastAnnouncedDenomination;
+    final cooldownElapsed = _lastAnnouncedTime == null ||
+        now.difference(_lastAnnouncedTime!).inMilliseconds > 4000;
+
+    if (force || !isSameDenom || cooldownElapsed) {
+      _lastAnnouncedDenomination = denom;
+      _lastAnnouncedTime = now;
+      HapticFeedback.heavyImpact();
+      ref.read(ttsStateProvider.notifier).speak('$denom Rupees detected', interrupt: true);
+    }
   }
 
   void _startFrameStream() {
@@ -54,16 +72,19 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
     final cameraService = ref.read(cameraServiceProvider);
     final source = cameraService.currentSource;
     if (!source.isUsbCamera) {
-      _frameSub = source.frameStream.listen((image) {
+      _frameSub = source.frameStream.listen((image) async {
         if (!mounted || !_isActive) return;
-        ref.read(currencyStateProvider.notifier).processFrame(image);
+        final denom = await ref.read(currencyStateProvider.notifier).processFrame(image);
+        if (denom != null && mounted && _isActive) {
+          _announceDenominationIfNeeded(denom);
+        }
       });
     }
   }
 
   void _startScanLoop() {
     _scanTimer?.cancel();
-    _scanTimer = Timer.periodic(const Duration(milliseconds: 1800), (_) async {
+    _scanTimer = Timer.periodic(const Duration(milliseconds: 1400), (_) async {
       if (!mounted || !_isActive) return;
 
       final cameraService = ref.read(cameraServiceProvider);
@@ -77,20 +98,13 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
         if (_frameSub == null) {
           _startFrameStream();
         }
-        // Native camera uses continuous frame stream. Just read the state and speak it!
-        final state = ref.read(currencyStateProvider);
-        final result = state.lastResult;
-        if (result != null && result != _lastAnnouncedDenomination && !ref.read(ttsStateProvider).isSpeaking) {
-          _lastAnnouncedDenomination = result;
-          ref.read(ttsStateProvider.notifier).speak('$result Rupees detected', interrupt: true);
-        }
       }
     });
   }
 
-  Future<void> _captureAndScan() async {
+  Future<void> _captureAndScan({bool forceAnnounce = false}) async {
     if (_isProcessingSnapshot || !mounted || !_isActive) return;
-    if (ref.read(ttsStateProvider).isSpeaking) return;
+    if (!forceAnnounce && ref.read(ttsStateProvider).isSpeaking) return;
 
     try {
       _isProcessingSnapshot = true;
@@ -98,10 +112,13 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
       final bytes = await cameraService.extractFrame();
       if (bytes != null && bytes.isNotEmpty && mounted && _isActive) {
         final result = await ref.read(currencyStateProvider.notifier).processImageBytes(bytes);
-        // Announce denomination if new (avoid repeating the same note)
-        if (result != null && result != _lastAnnouncedDenomination) {
-          _lastAnnouncedDenomination = result;
-          ref.read(ttsStateProvider.notifier).speak('$result Rupees detected', interrupt: true);
+        if (result != null) {
+          _announceDenominationIfNeeded(result, force: forceAnnounce);
+        } else if (forceAnnounce) {
+          ref.read(ttsStateProvider.notifier).speak(
+            'No banknote detected yet. Hold note steady in front of camera.',
+            interrupt: true,
+          );
         }
       }
     } catch (e) {
@@ -175,9 +192,22 @@ class _CurrencyModeScreenState extends ConsumerState<CurrencyModeScreen> {
           behavior: HitTestBehavior.opaque,
           onTap: () async {
             HapticFeedback.mediumImpact();
-            ref.read(ttsStateProvider.notifier).speak('Scanning banknote.');
-            _lastAnnouncedDenomination = null; // Force re-announce on manual tap
-            await _captureAndScan();
+            _lastAnnouncedDenomination = null;
+            _lastAnnouncedTime = null;
+            final cameraService = ref.read(cameraServiceProvider);
+            if (cameraService.currentSource.isUsbCamera) {
+              await _captureAndScan(forceAnnounce: true);
+            } else {
+              final currentDenom = ref.read(currencyStateProvider).denomination;
+              if (currentDenom != null) {
+                _announceDenominationIfNeeded(currentDenom, force: true);
+              } else {
+                ref.read(ttsStateProvider.notifier).speak(
+                  'Scanning banknote. Hold note steady.',
+                  interrupt: true,
+                );
+              }
+            }
           },
           child: Stack(
             children: [
